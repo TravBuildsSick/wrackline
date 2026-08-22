@@ -5,8 +5,6 @@
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
     <!-- Below API 33, READ_MEDIA_AUDIO doesn't exist -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
-    <!-- Visualizer (audio-reactive ring) needs this even when only reading our own session -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Background/lock-screen playback -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
@@ -38,6 +36,17 @@
                 <action android:name="androidx.media3.session.MediaSessionService" />
             </intent-filter>
         </service>
+
+        <receiver
+            android:name=".WracklineWidgetProvider"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/wrackline_widget_info" />
+        </receiver>
 
     </application>
 

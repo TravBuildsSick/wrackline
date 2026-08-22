@@ -29,8 +29,8 @@ fun isPackInstalled(context: Context, packId: String) = installedMarker(context,
 
 fun fetchPackManifest(): List<MusicPack> {
     val connection = URL(PACKS_URL).openConnection() as HttpURLConnection
-    connection.connectTimeout = 8000
-    connection.readTimeout = 8000
+    connection.connectTimeout = 20000
+    connection.readTimeout = 20000
     try {
         val body = connection.inputStream.bufferedReader().use { it.readText() }
         val array: JSONArray = JSONArray(body)
@@ -53,8 +53,8 @@ fun fetchPackManifest(): List<MusicPack> {
 fun downloadAndInstallPack(context: Context, pack: MusicPack) {
     val releaseUrl = "https://api.github.com/repos/$GITHUB_OWNER/$GITHUB_REPO/releases/tags/${pack.releaseTag}"
     val releaseConn = URL(releaseUrl).openConnection() as HttpURLConnection
-    releaseConn.connectTimeout = 8000
-    releaseConn.readTimeout = 8000
+    releaseConn.connectTimeout = 20000
+    releaseConn.readTimeout = 20000
     releaseConn.setRequestProperty("Accept", "application/vnd.github+json")
     val zipDownloadUrl: String
     try {
@@ -72,8 +72,8 @@ fun downloadAndInstallPack(context: Context, pack: MusicPack) {
     dir.mkdirs()
 
     val zipConn = URL(zipDownloadUrl).openConnection() as HttpURLConnection
-    zipConn.connectTimeout = 8000
-    zipConn.readTimeout = 60000
+    zipConn.connectTimeout = 20000
+    zipConn.readTimeout = 120000
     zipConn.instanceFollowRedirects = true
     try {
         ZipInputStream(zipConn.inputStream.buffered()).use { zip ->
@@ -94,21 +94,36 @@ fun downloadAndInstallPack(context: Context, pack: MusicPack) {
     installedMarker(context, pack.id).writeText("ok")
 }
 
+private val AUDIO_EXTENSIONS = setOf("mp3", "flac", "wav", "m4a", "ogg")
+
+/** Tracks belonging to one specific pack, in the same order queryPackTracks would list them. */
+fun queryTracksForPack(context: Context, packId: String, artIndexStart: Int = 0): List<Track> {
+    val packDir = packsDir(context, packId)
+    if (!File(packDir, ".installed").exists()) return emptyList()
+    var artIndex = artIndexStart
+    return packDir.listFiles { f -> f.extension.lowercase() in AUDIO_EXTENSIONS }
+        ?.sortedBy { it.name }
+        ?.map { file ->
+            val uri = Uri.fromFile(file)
+            val artist = try {
+                android.media.MediaMetadataRetriever().use { retriever ->
+                    retriever.setDataSource(file.absolutePath)
+                    retriever.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST)
+                }
+            } catch (e: Exception) {
+                null
+            }
+            Track(id = uri.toString(), uri = uri, name = file.nameWithoutExtension, artist = artist, artIndex = artIndex++)
+        } ?: emptyList()
+}
+
 /** All tracks from every pack already downloaded to app-private storage. */
 fun queryPackTracks(context: Context): List<Track> {
     val packsRoot = File(context.filesDir, "packs")
     if (!packsRoot.exists()) return emptyList()
     val tracks = mutableListOf<Track>()
-    var artIndex = 0
     packsRoot.listFiles()?.sortedBy { it.name }?.forEach { packDir ->
-        if (!File(packDir, ".installed").exists()) return@forEach
-        packDir.listFiles { f -> f.extension.lowercase() in setOf("mp3", "flac", "wav", "m4a", "ogg") }
-            ?.sortedBy { it.name }
-            ?.forEach { file ->
-                val uri = Uri.fromFile(file)
-                tracks.add(Track(id = uri.toString(), uri = uri, name = file.nameWithoutExtension, artIndex = artIndex))
-                artIndex++
-            }
+        tracks.addAll(queryTracksForPack(context, packDir.name, tracks.size))
     }
     return tracks
 }

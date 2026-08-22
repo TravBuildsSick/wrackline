@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="Wrackline icon">
+  <defs>
+    <linearGradient id="wrackline-sky-icon" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#0B1B3A"/>
+      <stop offset="15%" stop-color="#7C2622"/>
+      <stop offset="42%" stop-color="#CE4E1C"/>
+      <stop offset="70%" stop-color="#ED8B1F"/>
+      <stop offset="100%" stop-color="#F4C63D"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#wrackline-sky-icon)"/>
+  <g stroke="#093C39" fill="none" stroke-width="36" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M74.00 212.00 L126.00 168.00 L178.00 249.40 L230.00 168.00 L282.00 249.40 L334.00 168.00 L386.00 249.40 L438.00 212.00"/>
+  </g>
+  <g stroke="#093C39" fill="none" stroke-width="14" stroke-linecap="round">
+    <path d="M178.00 249.40 L160.08 361.40 M282.00 249.40 L264.08 361.40 M386.00 249.40 L368.08 361.40"/>
+  </g>
+</svg>

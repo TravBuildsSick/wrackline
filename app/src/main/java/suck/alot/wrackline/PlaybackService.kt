@@ -1,12 +1,18 @@
 package suck.alot.wrackline
 
-import android.media.audiofx.Visualizer
+import android.content.Context
+import android.content.Intent
+import androidx.annotation.OptIn
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.audio.AudioSink
+import androidx.media3.exoplayer.audio.DefaultAudioSink
+import androidx.media3.exoplayer.audio.TeeAudioProcessor
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
-import kotlin.math.abs
 
 /**
  * Foreground MediaSessionService — this is what keeps audio playing (and the lock-screen
@@ -17,11 +23,28 @@ import kotlin.math.abs
 class PlaybackService : MediaSessionService() {
     private lateinit var player: ExoPlayer
     private lateinit var mediaSession: MediaSession
-    private var visualizer: Visualizer? = null
 
+    @OptIn(UnstableApi::class)
     override fun onCreate() {
         super.onCreate()
-        player = ExoPlayer.Builder(this)
+
+        // Taps ExoPlayer's own PCM stream for the visualizer — no android.media.audiofx.Visualizer,
+        // no RECORD_AUDIO permission, and it can't fail to attach the way a Visualizer sometimes does.
+        val tee = TeeAudioProcessor(VisualizerSink(AudioReactive.analyzer))
+        val renderersFactory = object : DefaultRenderersFactory(this) {
+            override fun buildAudioSink(
+                context: Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean,
+            ): AudioSink =
+                DefaultAudioSink.Builder(context)
+                    .setAudioProcessorChain(
+                        DefaultAudioSink.DefaultAudioProcessorChain(tee),
+                    )
+                    .build()
+        }
+
+        player = ExoPlayer.Builder(this, renderersFactory)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setUsage(C.USAGE_MEDIA)
@@ -33,64 +56,38 @@ class PlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .build()
 
-        player.addListener(object : androidx.media3.common.Player.Listener {
-            override fun onAudioSessionIdChanged(audioSessionId: Int) {
-                attachVisualizer(audioSessionId)
-            }
-        })
-
         mediaSession = MediaSession.Builder(this, player).build()
+
+        player.addListener(object : androidx.media3.common.Player.Listener {
+            override fun onIsPlayingChanged(isPlaying: Boolean) = pushWidgetUpdate()
+            override fun onMediaItemTransition(mediaItem: androidx.media3.common.MediaItem?, reason: Int) = pushWidgetUpdate()
+        })
     }
 
-    private fun attachVisualizer(audioSessionId: Int) {
-        visualizer?.release()
-        if (audioSessionId == C.AUDIO_SESSION_ID_UNSET) {
-            AudioReactive.level.value = 0f
-            return
-        }
-        visualizer = try {
-            Visualizer(audioSessionId).apply {
-                captureSize = Visualizer.getCaptureSizeRange()[0]
-                setDataCaptureListener(
-                    object : Visualizer.OnDataCaptureListener {
-                        override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {
-                            if (waveform == null) return
-                            // Visualizer waveform bytes are UNSIGNED 8-bit PCM (0..255, 128 =
-                            // silence) — Kotlin's Byte is signed, so each sample must be masked
-                            // to 0xFF before computing deviation from the 128 midpoint.
-                            var sum = 0
-                            for (b in waveform) {
-                                val unsigned = b.toInt() and 0xFF
-                                sum += abs(unsigned - 128)
-                            }
-                            val avg = sum.toFloat() / waveform.size
-                            val sample = (avg / 128f).coerceIn(0f, 1f)
-                            // Light exponential smoothing — raw per-frame amplitude is jittery
-                            // enough to read as flicker rather than a pulse.
-                            val prev = AudioReactive.level.value
-                            AudioReactive.level.value = prev * 0.6f + sample * 0.4f
-                        }
-
-                        override fun onFftDataCapture(v: Visualizer?, fft: ByteArray?, samplingRate: Int) {}
-                    },
-                    Visualizer.getMaxCaptureRate() / 2,
-                    /* waveform= */ true,
-                    /* fft= */ false,
-                )
-                enabled = true
-            }
-        } catch (e: RuntimeException) {
-            // Visualizer can fail to init (no RECORD_AUDIO permission, or platform quirks) —
-            // the app should keep playing audio either way, just without the reactive ring.
-            null
-        }
+    private fun pushWidgetUpdate() {
+        val metadata = player.currentMediaItem?.mediaMetadata
+        WracklineWidgetProvider.updateAll(
+            context = this,
+            trackName = metadata?.title?.toString() ?: "Wrackline",
+            artist = metadata?.artist?.toString(),
+            isPlaying = player.isPlaying,
+        )
     }
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = mediaSession
 
+    // Without this, swiping the app away from Recents leaves the service (and its foreground
+    // notification) running indefinitely even when nothing is playing — MediaSessionService
+    // gets no other signal that the task is gone. Only actually-playing audio should survive
+    // the task being swiped away; paused/stopped playback should not.
+    override fun onTaskRemoved(rootIntent: Intent?) {
+        if (!player.isPlaying) {
+            stopSelf()
+        }
+        super.onTaskRemoved(rootIntent)
+    }
+
     override fun onDestroy() {
-        visualizer?.release()
-        visualizer = null
         mediaSession.release()
         player.release()
         super.onDestroy()

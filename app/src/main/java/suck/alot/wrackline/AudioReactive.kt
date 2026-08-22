@@ -1,11 +1,11 @@
 package suck.alot.wrackline
 
-import kotlinx.coroutines.flow.MutableStateFlow
-
 /**
- * In-process bridge from PlaybackService's Visualizer capture to the UI's canvas — safe because
- * the service and the activity always run in the same process here (no android:process split).
+ * The live spectrum analyzer, shared between PlaybackService (which feeds it PCM via
+ * VisualizerSink/TeeAudioProcessor) and whichever Composable is polling analyzer.latest() this
+ * frame. Safe as a plain singleton — SpectrumAnalyzer holds no Android resource handles, just
+ * DSP state, so it can outlive any single PlaybackService instance.
  */
 object AudioReactive {
-    val level = MutableStateFlow(0f)
+    val analyzer = SpectrumAnalyzer()
 }

@@ -10,8 +10,13 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -31,6 +36,7 @@ import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -52,7 +58,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -60,6 +65,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -79,12 +85,26 @@ import kotlinx.coroutines.withContext
 import kotlin.math.cos
 import kotlin.math.sin
 
-private val NavyBg = Color(0xFF0A0807)
+// Light variants are lighter tints of the same teal/navy hue family, not a different palette.
+private val NavyBgDark = Color(0xFF0A0807)
+private val NavyBgLight = Color(0xFFEFF3F1)
 private val RedAccent = Color(0xFFC2453A)
 private val Cream = Color(0xFFCFC1A3)
-private val TextPrimary = Color(0xFFEEF7F4)
-private val TextSecondary = Color(0xFF90A8A3)
-private val TextMuted = Color(0xFF5F7C76)
+private val TextPrimaryDark = Color(0xFFEEF7F4)
+private val TextPrimaryLight = Color(0xFF12211E)
+private val TextSecondaryDark = Color(0xFF90A8A3)
+private val TextSecondaryLight = Color(0xFF4F6B65)
+private val TextMutedDark = Color(0xFF5F7C76)
+private val TextMutedLight = Color(0xFF8AA39D)
+
+private val NavyBg: Color
+    @Composable get() = if (androidx.compose.foundation.isSystemInDarkTheme()) NavyBgDark else NavyBgLight
+private val TextPrimary: Color
+    @Composable get() = if (androidx.compose.foundation.isSystemInDarkTheme()) TextPrimaryDark else TextPrimaryLight
+private val TextSecondary: Color
+    @Composable get() = if (androidx.compose.foundation.isSystemInDarkTheme()) TextSecondaryDark else TextSecondaryLight
+private val TextMuted: Color
+    @Composable get() = if (androidx.compose.foundation.isSystemInDarkTheme()) TextMutedDark else TextMutedLight
 
 private val ArtPalette = listOf(
     Brush.linearGradient(listOf(Color(0xFF8A2E2E), Color(0xFFC2453A))),
@@ -98,6 +118,7 @@ data class Track(
     val id: String,
     val uri: Uri,
     val name: String,
+    val artist: String?,
     val artIndex: Int,
 )
 
@@ -113,14 +134,26 @@ class MainActivity : ComponentActivity() {
         controllerFuture = MediaController.Builder(this, sessionToken).buildAsync()
 
         setContent {
-            val colorScheme = darkColorScheme(
-                primary = RedAccent,
-                onPrimary = Color.White,
-                background = NavyBg,
-                onBackground = TextPrimary,
-                surface = NavyBg,
-                onSurface = TextPrimary,
-            )
+            val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+            val colorScheme = if (isDark) {
+                darkColorScheme(
+                    primary = RedAccent,
+                    onPrimary = Color.White,
+                    background = NavyBgDark,
+                    onBackground = TextPrimaryDark,
+                    surface = NavyBgDark,
+                    onSurface = TextPrimaryDark,
+                )
+            } else {
+                androidx.compose.material3.lightColorScheme(
+                    primary = RedAccent,
+                    onPrimary = Color.White,
+                    background = NavyBgLight,
+                    onBackground = TextPrimaryLight,
+                    surface = NavyBgLight,
+                    onSurface = TextPrimaryLight,
+                )
+            }
             MaterialTheme(colorScheme = colorScheme) {
                 PlayerScreen(controllerFuture = controllerFuture)
             }
@@ -148,7 +181,7 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
     var controller by remember { mutableStateOf<MediaController?>(null) }
     val tracks = remember { mutableStateListOf<Track>() }
     val liked = remember { mutableStateOf(setOf<String>()) }
-    var currentIndex by remember { mutableIntStateOf(-1) }
+    var currentTrackId by remember { mutableStateOf<String?>(null) }
     var isPlaying by remember { mutableStateOf(false) }
     var positionMs by remember { mutableFloatStateOf(0f) }
     var durationMs by remember { mutableFloatStateOf(0f) }
@@ -164,6 +197,12 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         Manifest.permission.READ_EXTERNAL_STORAGE
     }
     var packSyncStatus by remember { mutableStateOf<String?>("Checking for preinstalled music…") }
+    var playlists by remember { mutableStateOf<List<Playlist>>(emptyList()) }
+    var selectedTabId by remember { mutableStateOf("all") }
+
+    LaunchedEffect(Unit) {
+        playlists = withContext(Dispatchers.IO) { loadPlaylists(activity) }
+    }
 
     fun refreshLibrary() {
         val c = controller ?: return
@@ -176,23 +215,48 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
             MediaItem.Builder()
                 .setUri(track.uri)
                 .setMediaId(track.id)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(track.name).build())
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(track.name).setArtist(track.artist).build())
                 .build()
         }
         c.setMediaItems(items)
         c.prepare()
     }
 
+    fun playFrom(list: List<Track>, index: Int) {
+        val c = controller ?: return
+        val items = list.map { track ->
+            MediaItem.Builder()
+                .setUri(track.uri)
+                .setMediaId(track.id)
+                .setMediaMetadata(MediaMetadata.Builder().setTitle(track.name).setArtist(track.artist).build())
+                .build()
+        }
+        c.setMediaItems(items, index, 0)
+        c.prepare()
+        c.play()
+    }
+
     // Preinstalled packs (e.g. Shorebreak) download once on first launch, independent of the
     // on-device library permission — they live in app-private storage, no permission needed.
+    // Also re-derives each pack's locked playlist on every launch (not just right after a fresh
+    // download) so an update from a version that predates playlists still ends up with one.
     LaunchedEffect(controller) {
         if (controller == null) return@LaunchedEffect
         try {
             val manifest = withContext(Dispatchers.IO) { fetchPackManifest() }
             for (pack in manifest.filter { it.preinstalled }) {
-                if (isPackInstalled(activity, pack.id)) continue
-                packSyncStatus = "Downloading ${pack.name}…"
-                withContext(Dispatchers.IO) { downloadAndInstallPack(activity, pack) }
+                if (!isPackInstalled(activity, pack.id)) {
+                    packSyncStatus = "Downloading ${pack.name}…"
+                    withContext(Dispatchers.IO) { downloadAndInstallPack(activity, pack) }
+                }
+                val packTrackIds = withContext(Dispatchers.IO) {
+                    queryTracksForPack(activity, pack.id).map { it.id }
+                }
+                if (packTrackIds.isNotEmpty()) {
+                    playlists = withContext(Dispatchers.IO) {
+                        ensureLockedPackPlaylist(activity, pack.name, packTrackIds)
+                    }
+                }
             }
         } catch (e: Exception) {
             // No network / repo unreachable — fine, just skip preinstall this launch.
@@ -206,17 +270,17 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
     // Media3's foreground-service notification (which carries the lock-screen transport
     // controls) can't post on API 33+, even though the service itself still runs.
     val requestedPermissions = if (android.os.Build.VERSION.SDK_INT >= 33) {
-        arrayOf(libraryPermission, Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+        arrayOf(libraryPermission, Manifest.permission.POST_NOTIFICATIONS)
     } else {
-        arrayOf(libraryPermission, Manifest.permission.RECORD_AUDIO)
+        arrayOf(libraryPermission)
     }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
         libraryPermissionGranted = results[libraryPermission] == true
         if (libraryPermissionGranted) refreshLibrary()
-        // RECORD_AUDIO/POST_NOTIFICATIONS being denied doesn't block this — playback still works,
-        // just without the reactive ring and/or the lock-screen notification respectively.
+        // POST_NOTIFICATIONS being denied doesn't block this — playback still works, just
+        // without the lock-screen notification.
     }
     LaunchedEffect(Unit) {
         permissionLauncher.launch(requestedPermissions)
@@ -232,7 +296,7 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                 }
 
                 override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                    currentIndex = c.currentMediaItemIndex
+                    currentTrackId = mediaItem?.mediaId
                     durationMs = c.duration.coerceAtLeast(0).toFloat()
                 }
 
@@ -262,8 +326,18 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         if (controller != null && libraryPermissionGranted && tracks.isEmpty()) refreshLibrary()
     }
 
-    val currentTrack = tracks.getOrNull(currentIndex)
-    val level by AudioReactive.level.collectAsState()
+    val currentTrack = tracks.find { it.id == currentTrackId }
+    var visualizerChoice by remember { mutableStateOf(VisualizerChoice.RAIN) }
+    var expanded by remember { mutableStateOf(false) }
+    var showCreateDialog by remember { mutableStateOf(false) }
+    var newPlaylistName by remember { mutableStateOf("") }
+    var addToPlaylistTrackId by remember { mutableStateOf<String?>(null) }
+    val selectedPlaylist = playlists.find { it.id == selectedTabId }
+    val displayedTracks = if (selectedTabId == "all") {
+        tracks
+    } else {
+        selectedPlaylist?.trackIds?.mapNotNull { id -> tracks.find { it.id == id } } ?: emptyList()
+    }
 
     Box(
         modifier = Modifier
@@ -277,134 +351,86 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                 ),
             ),
     ) {
+        val timeline = @Composable {
+            val sliderValue = if (isSeeking) seekPreview else positionMs
+            val sliderMax = durationMs.coerceAtLeast(1f)
+            Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 22.dp)) {
+                Slider(
+                    value = sliderValue.coerceIn(0f, sliderMax),
+                    onValueChange = {
+                        isSeeking = true
+                        seekPreview = it
+                    },
+                    onValueChangeFinished = {
+                        controller?.seekTo(seekPreview.toLong())
+                        isSeeking = false
+                    },
+                    valueRange = 0f..sliderMax,
+                    colors = SliderDefaults.colors(
+                        thumbColor = RedAccent,
+                        activeTrackColor = RedAccent,
+                        inactiveTrackColor = Color.White.copy(alpha = 0.14f),
+                    ),
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(formatTime((if (isSeeking) seekPreview else positionMs).toLong()), color = TextSecondary, fontSize = 12.sp)
+                    Text(formatTime(durationMs.toLong()), color = TextSecondary, fontSize = 12.sp)
+                }
+            }
+        }
+
+        val tabOrder = listOf("all") + playlists.map { it.id }
+        var tabDragAccum by remember { mutableFloatStateOf(0f) }
+
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 22.dp, vertical = 20.dp),
+                .draggable(
+                    orientation = androidx.compose.foundation.gestures.Orientation.Horizontal,
+                    state = androidx.compose.foundation.gestures.rememberDraggableState { delta -> tabDragAccum += delta },
+                    onDragStopped = {
+                        val currentIdx = tabOrder.indexOf(selectedTabId).coerceAtLeast(0)
+                        if (tabDragAccum < -80f && currentIdx < tabOrder.lastIndex) {
+                            selectedTabId = tabOrder[currentIdx + 1]
+                        } else if (tabDragAccum > 80f && currentIdx > 0) {
+                            selectedTabId = tabOrder[currentIdx - 1]
+                        }
+                        tabDragAccum = 0f
+                    },
+                ),
         ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    "NOW PLAYING",
-                    color = TextSecondary,
-                    fontSize = 12.sp,
-                    letterSpacing = 1.sp,
-                )
-                IconButton(onClick = {
+            VisualizerSquare(
+                choice = visualizerChoice,
+                onChoiceChange = { visualizerChoice = it },
+                trackName = currentTrack?.name ?: "Nothing playing",
+                expanded = expanded,
+                onExpandChange = { expanded = it },
+                timelineContent = timeline,
+                onRescan = {
                     if (libraryPermissionGranted) {
                         refreshLibrary()
                     } else {
                         permissionLauncher.launch(requestedPermissions)
                     }
-                }) {
-                    Icon(Icons.Filled.Refresh, contentDescription = "Rescan library", tint = TextPrimary)
-                }
-            }
-
-            Spacer(Modifier.height(24.dp))
-
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 30.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                VinylRing(
-                    track = currentTrack,
-                    level = if (isPlaying) level else 0f,
-                )
-            }
-
-            Spacer(Modifier.height(24.dp))
-
-            Column(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Text(
-                    currentTrack?.name ?: "Nothing playing",
-                    color = TextPrimary,
-                    fontSize = 22.sp,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 1,
-                )
-                Text("Local file", color = TextSecondary, fontSize = 13.sp)
-            }
-
-            Spacer(Modifier.height(16.dp))
-
-            val sliderValue = if (isSeeking) seekPreview else positionMs
-            val sliderMax = durationMs.coerceAtLeast(1f)
-            Slider(
-                value = sliderValue.coerceIn(0f, sliderMax),
-                onValueChange = {
-                    isSeeking = true
-                    seekPreview = it
                 },
-                onValueChangeFinished = {
-                    controller?.seekTo(seekPreview.toLong())
-                    isSeeking = false
-                },
-                valueRange = 0f..sliderMax,
-                colors = SliderDefaults.colors(
-                    thumbColor = RedAccent,
-                    activeTrackColor = RedAccent,
-                    inactiveTrackColor = Color.White.copy(alpha = 0.14f),
-                ),
-            )
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
-                Text(formatTime((if (isSeeking) seekPreview else positionMs).toLong()), color = TextSecondary, fontSize = 12.sp)
-                Text(formatTime(durationMs.toLong()), color = TextSecondary, fontSize = 12.sp)
-            }
-
-            Spacer(Modifier.height(12.dp))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = {
+                isPlaying = isPlaying,
+                isShuffleOn = shuffleOn,
+                repeatMode = repeatMode,
+                isLiked = currentTrack?.id in liked.value,
+                onShuffle = {
                     shuffleOn = !shuffleOn
                     controller?.shuffleModeEnabled = shuffleOn
-                }) {
-                    Icon(
-                        Icons.Filled.Shuffle,
-                        contentDescription = "Shuffle",
-                        tint = if (shuffleOn) RedAccent else TextSecondary,
-                    )
-                }
-                IconButton(onClick = { controller?.seekToPrevious() }) {
-                    Icon(Icons.Filled.SkipPrevious, contentDescription = "Previous", tint = TextPrimary, modifier = Modifier.size(30.dp))
-                }
-                Box(
-                    modifier = Modifier
-                        .size(60.dp)
-                        .clip(CircleShape)
-                        .background(RedAccent)
-                        .clickable {
-                            val c = controller ?: return@clickable
-                            if (c.isPlaying) c.pause() else c.play()
-                        },
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        contentDescription = "Play/Pause",
-                        tint = NavyBg,
-                        modifier = Modifier.size(28.dp),
-                    )
-                }
-                IconButton(onClick = { controller?.seekToNext() }) {
-                    Icon(Icons.Filled.SkipNext, contentDescription = "Next", tint = TextPrimary, modifier = Modifier.size(30.dp))
-                }
-                IconButton(onClick = {
+                },
+                onPrevious = { controller?.seekToPrevious() },
+                onPlayPause = {
+                    val c = controller ?: return@VisualizerSquare
+                    if (c.isPlaying) c.pause() else c.play()
+                },
+                onNext = { controller?.seekToNext() },
+                onRepeat = {
                     repeatMode = when (repeatMode) {
                         RepeatMode.OFF -> RepeatMode.ALL
                         RepeatMode.ALL -> RepeatMode.ONE
@@ -415,136 +441,365 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                         RepeatMode.ALL -> Player.REPEAT_MODE_ALL
                         RepeatMode.ONE -> Player.REPEAT_MODE_ONE
                     }
-                }) {
-                    Icon(
-                        if (repeatMode == RepeatMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
-                        contentDescription = "Repeat",
-                        tint = if (repeatMode == RepeatMode.OFF) TextSecondary else RedAccent,
-                    )
-                }
-                IconButton(onClick = {
-                    val id = currentTrack?.id ?: return@IconButton
+                },
+                onLike = {
+                    val id = currentTrack?.id ?: return@VisualizerSquare
                     liked.value = if (id in liked.value) liked.value - id else liked.value + id
-                }) {
-                    val isLiked = currentTrack?.id in liked.value
-                    Icon(
-                        if (isLiked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
-                        contentDescription = "Like",
-                        tint = RedAccent,
-                    )
-                }
-            }
-
-            Spacer(Modifier.height(24.dp))
-
-            Text(
-                "QUEUE",
-                color = TextSecondary,
-                fontSize = 12.sp,
-                letterSpacing = 1.sp,
+                },
             )
-            Spacer(Modifier.height(8.dp))
 
-            packSyncStatus?.let {
-                Text(it, color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp))
-            }
+            if (!expanded) {
+                Spacer(Modifier.height(16.dp))
+                timeline()
 
-            if (tracks.isEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 24.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        when {
-                            packSyncStatus != null -> ""
-                            !libraryPermissionGranted -> "Grant music library access to see your songs"
-                            else -> "No music found on this device"
-                        },
-                        color = TextMuted,
-                        fontSize = 13.sp,
-                    )
-                }
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(tracks, key = { it.id }) { track ->
-                        val index = tracks.indexOf(track)
-                        QueueRow(
-                            track = track,
-                            isCurrent = index == currentIndex,
-                            isLiked = track.id in liked.value,
-                            onPlay = {
-                                controller?.seekTo(index, 0)
-                                controller?.play()
-                            },
-                            onLike = {
-                                liked.value = if (track.id in liked.value) liked.value - track.id else liked.value + track.id
-                            },
-                            onRemove = {
-                                controller?.removeMediaItem(index)
-                                tracks.removeAt(index)
-                            },
-                        )
+                Column(modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 22.dp)) {
+                    Spacer(Modifier.height(24.dp))
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .horizontalScroll(androidx.compose.foundation.rememberScrollState()),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        TabChip(label = "All", selected = selectedTabId == "all", locked = false) { selectedTabId = "all" }
+                        playlists.forEach { p ->
+                            TabChip(label = p.name, selected = selectedTabId == p.id, locked = p.locked) { selectedTabId = p.id }
+                        }
+                        TabChip(label = "+ New", selected = false, locked = false) { showCreateDialog = true }
+                    }
+
+                    if (selectedPlaylist != null && !selectedPlaylist.locked) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            Text(
+                                "Delete playlist",
+                                color = TextMuted,
+                                fontSize = 12.sp,
+                                modifier = Modifier.clickable {
+                                    playlists = deletePlaylist(activity, selectedPlaylist.id)
+                                    selectedTabId = "all"
+                                },
+                            )
+                        }
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+
+                    packSyncStatus?.let {
+                        Text(it, color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp))
+                    }
+
+                    if (displayedTracks.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text(
+                                when {
+                                    packSyncStatus != null -> ""
+                                    selectedTabId != "all" -> "No tracks in this playlist yet"
+                                    !libraryPermissionGranted -> "Grant music library access to see your songs"
+                                    else -> "No music found on this device"
+                                },
+                                color = TextMuted,
+                                fontSize = 13.sp,
+                            )
+                        }
+                    } else {
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(displayedTracks, key = { it.id }) { track ->
+                                val index = displayedTracks.indexOf(track)
+                                QueueRow(
+                                    track = track,
+                                    isCurrent = track.id == currentTrackId,
+                                    isLiked = track.id in liked.value,
+                                    showRemove = selectedTabId != "all" && selectedPlaylist?.locked != true,
+                                    onPlay = { playFrom(displayedTracks, index) },
+                                    onLike = {
+                                        liked.value = if (track.id in liked.value) liked.value - track.id else liked.value + track.id
+                                    },
+                                    onRemove = {
+                                        if (selectedPlaylist != null) {
+                                            playlists = removeTrackFromPlaylist(activity, selectedPlaylist.id, track.id)
+                                        }
+                                    },
+                                    onAddToPlaylist = { addToPlaylistTrackId = track.id },
+                                )
+                            }
+                        }
                     }
                 }
+            }
+        }
+    }
+
+    if (showCreateDialog) {
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showCreateDialog = false; newPlaylistName = "" },
+            title = { Text("New playlist") },
+            text = {
+                androidx.compose.material3.OutlinedTextField(
+                    value = newPlaylistName,
+                    onValueChange = { newPlaylistName = it },
+                    singleLine = true,
+                    label = { Text("Name") },
+                )
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    if (newPlaylistName.isNotBlank()) {
+                        playlists = createPlaylist(activity, newPlaylistName.trim())
+                    }
+                    showCreateDialog = false
+                    newPlaylistName = ""
+                }) { Text("Create") }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { showCreateDialog = false; newPlaylistName = "" }) { Text("Cancel") }
+            },
+        )
+    }
+
+    val addToPlaylistTarget = addToPlaylistTrackId
+    if (addToPlaylistTarget != null) {
+        val userPlaylists = playlists.filter { !it.locked }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { addToPlaylistTrackId = null },
+            title = { Text("Add to playlist") },
+            text = {
+                if (userPlaylists.isEmpty()) {
+                    Text("No playlists yet — tap \"+ New\" to make one.", color = TextSecondary)
+                } else {
+                    Column {
+                        userPlaylists.forEach { p ->
+                            Text(
+                                p.name,
+                                color = TextPrimary,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        playlists = addTrackToPlaylist(activity, p.id, addToPlaylistTarget)
+                                        addToPlaylistTrackId = null
+                                    }
+                                    .padding(vertical = 10.dp),
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = { addToPlaylistTrackId = null }) { Text("Done") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun TabChip(label: String, selected: Boolean, locked: Boolean, onClick: () -> Unit) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) RedAccent else Color.White.copy(alpha = 0.06f))
+            .border(
+                1.dp,
+                if (selected) RedAccent else Color.White.copy(alpha = 0.12f),
+                RoundedCornerShape(20.dp),
+            )
+            .clickable { onClick() }
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+    ) {
+        if (locked) {
+            Icon(
+                Icons.Filled.Lock,
+                contentDescription = null,
+                tint = if (selected) Color.White else TextSecondary,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(4.dp))
+        }
+        Text(
+            label,
+            color = if (selected) Color.White else TextSecondary,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Medium,
+        )
+    }
+}
+
+private enum class VisualizerChoice { RAIN, STRAND }
+
+@Composable
+private fun VisualizerSquare(
+    choice: VisualizerChoice,
+    onChoiceChange: (VisualizerChoice) -> Unit,
+    trackName: String,
+    onRescan: () -> Unit,
+    expanded: Boolean,
+    onExpandChange: (Boolean) -> Unit,
+    timelineContent: @Composable () -> Unit,
+    isPlaying: Boolean,
+    isShuffleOn: Boolean,
+    repeatMode: RepeatMode,
+    isLiked: Boolean,
+    onShuffle: () -> Unit,
+    onPrevious: () -> Unit,
+    onPlayPause: () -> Unit,
+    onNext: () -> Unit,
+    onRepeat: () -> Unit,
+    onLike: () -> Unit,
+) {
+    val heightFraction by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (expanded) 0.92f else 0.5f,
+        label = "visualizerHeight",
+    )
+    var dragAccum by remember { mutableFloatStateOf(0f) }
+    // Overlay text/icons sit on top of the visualizer canvas itself, which flips between a
+    // near-black and a near-white water in dark/light mode — so these need to track that same
+    // switch rather than assuming a dark canvas underneath.
+    val isDark = androidx.compose.foundation.isSystemInDarkTheme()
+    val onVisualizer = if (isDark) Color.White else Color(0xFF0F3630)
+    val glassTint = if (isDark) Color.White else Color(0xFF0F3630)
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .fillMaxHeight(heightFraction)
+            .draggable(
+                orientation = androidx.compose.foundation.gestures.Orientation.Vertical,
+                state = androidx.compose.foundation.gestures.rememberDraggableState { delta -> dragAccum += delta },
+                onDragStopped = {
+                    if (dragAccum > 60f) onExpandChange(true) else if (dragAccum < -60f) onExpandChange(false)
+                    dragAccum = 0f
+                },
+            ),
+    ) {
+        when (choice) {
+            VisualizerChoice.RAIN -> RainVisualizer(analyzer = AudioReactive.analyzer, modifier = Modifier.fillMaxSize())
+            VisualizerChoice.STRAND -> WracklineVisualizer(analyzer = AudioReactive.analyzer, modifier = Modifier.fillMaxSize())
+        }
+
+        // Header + title float directly over the visualizer instead of sitting above it.
+        Column(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .padding(top = 36.dp, start = 22.dp, end = 22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("NOW PLAYING", color = onVisualizer.copy(alpha = 0.7f), fontSize = 12.sp, letterSpacing = 1.sp)
+                IconButton(onClick = onRescan) {
+                    Icon(Icons.Filled.Refresh, contentDescription = "Rescan library", tint = onVisualizer)
+                }
+            }
+            Text(
+                trackName,
+                color = onVisualizer,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Medium,
+                maxLines = 1,
+                modifier = Modifier.padding(top = 4.dp),
+            )
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(VisualizerChoice.RAIN to "Rain", VisualizerChoice.STRAND to "Strand").forEach { (c, label) ->
+                    val selected = choice == c
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(if (selected) glassTint.copy(alpha = 0.22f) else glassTint.copy(alpha = 0.08f))
+                            .border(1.dp, glassTint.copy(alpha = if (selected) 0.4f else 0.16f), RoundedCornerShape(14.dp))
+                            .clickable { onChoiceChange(c) }
+                            .padding(horizontal = 12.dp, vertical = 6.dp),
+                    ) {
+                        Text(label, color = onVisualizer, fontSize = 12.sp, fontWeight = FontWeight.Medium)
+                    }
+                }
+            }
+        }
+
+        // Transport controls — each button is its own floating glass circle, no dock behind
+        // them. When expanded, the timeline sits directly under this row instead of below the
+        // whole square.
+        Column(
+            modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 18.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                GlassyIconButton(
+                    Icons.Filled.Shuffle,
+                    tint = if (isShuffleOn) RedAccent else onVisualizer,
+                    glassTint = glassTint,
+                    onClick = onShuffle,
+                )
+                GlassyIconButton(Icons.Filled.SkipPrevious, tint = onVisualizer, glassTint = glassTint, size = 40.dp, onClick = onPrevious)
+                Box(
+                    modifier = Modifier
+                        .size(52.dp)
+                        .clip(CircleShape)
+                        .background(RedAccent)
+                        .clickable { onPlayPause() },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        contentDescription = "Play/Pause",
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp),
+                    )
+                }
+                GlassyIconButton(Icons.Filled.SkipNext, tint = onVisualizer, glassTint = glassTint, size = 40.dp, onClick = onNext)
+                GlassyIconButton(
+                    if (repeatMode == RepeatMode.ONE) Icons.Filled.RepeatOne else Icons.Filled.Repeat,
+                    tint = if (repeatMode == RepeatMode.OFF) onVisualizer.copy(alpha = 0.6f) else RedAccent,
+                    glassTint = glassTint,
+                    onClick = onRepeat,
+                )
+                GlassyIconButton(
+                    if (isLiked) Icons.Filled.Favorite else Icons.Filled.FavoriteBorder,
+                    tint = RedAccent,
+                    glassTint = glassTint,
+                    onClick = onLike,
+                )
+            }
+            if (expanded) {
+                Spacer(Modifier.height(12.dp))
+                timelineContent()
             }
         }
     }
 }
 
 @Composable
-private fun VinylRing(track: Track?, level: Float) {
-    val glow = 0.35f + level * 0.5f
-    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(260.dp)) {
-        Canvas(modifier = Modifier.size(260.dp)) {
-            val ringStroke = 14.dp.toPx()
-            drawCircle(
-                color = Cream,
-                radius = size.minDimension / 2 - ringStroke / 2,
-                style = Stroke(width = ringStroke),
-            )
-            // Grooves — faint radial ticks, cheap stand-in for the mockup's conic-gradient ring.
-            val tickCount = 48
-            val outerR = size.minDimension / 2 - 2.dp.toPx()
-            val innerR = outerR - ringStroke + 2.dp.toPx()
-            for (i in 0 until tickCount) {
-                val angle = (i / tickCount.toFloat()) * 2 * Math.PI
-                val x1 = center.x + (innerR * cos(angle)).toFloat()
-                val y1 = center.y + (innerR * sin(angle)).toFloat()
-                val x2 = center.x + (outerR * cos(angle)).toFloat()
-                val y2 = center.y + (outerR * sin(angle)).toFloat()
-                drawLine(
-                    color = Color(0xFF4A3F2E).copy(alpha = 0.5f),
-                    start = Offset(x1, y1),
-                    end = Offset(x2, y2),
-                    strokeWidth = 1f,
-                )
-            }
-            // Audio-reactive glow ring — radius/alpha tracks live playback amplitude.
-            drawCircle(
-                color = RedAccent.copy(alpha = glow * 0.4f),
-                radius = size.minDimension / 2 + level * 18.dp.toPx(),
-                style = Stroke(width = (4 + level * 10).dp.toPx()),
-            )
-        }
-        Box(
-            modifier = Modifier
-                .size(180.dp)
-                .clip(CircleShape)
-                .background(
-                    if (track != null) ArtPalette[track.artIndex % ArtPalette.size]
-                    else Brush.linearGradient(listOf(Color(0xFF111F1E), Color(0xFF111F1E))),
-                ),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = track?.name?.take(1)?.uppercase() ?: "",
-                color = Color.White.copy(alpha = 0.85f),
-                fontSize = 48.sp,
-                fontWeight = FontWeight.Medium,
-            )
-        }
+private fun GlassyIconButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
+    glassTint: Color = Color.White,
+    size: androidx.compose.ui.unit.Dp = 34.dp,
+    onClick: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .size(size + 18.dp)
+            .clip(CircleShape)
+            .background(glassTint.copy(alpha = 0.10f))
+            .border(1.dp, glassTint.copy(alpha = 0.22f), CircleShape)
+            .clickable { onClick() },
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(size * 0.6f))
     }
 }
 
@@ -553,9 +808,11 @@ private fun QueueRow(
     track: Track,
     isCurrent: Boolean,
     isLiked: Boolean,
+    showRemove: Boolean,
     onPlay: () -> Unit,
     onLike: () -> Unit,
     onRemove: () -> Unit,
+    onAddToPlaylist: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -590,8 +847,13 @@ private fun QueueRow(
                 modifier = Modifier.size(18.dp),
             )
         }
-        IconButton(onClick = onRemove) {
-            Icon(Icons.Filled.Delete, contentDescription = "Remove", tint = TextMuted, modifier = Modifier.size(16.dp))
+        IconButton(onClick = onAddToPlaylist) {
+            Icon(Icons.Filled.Add, contentDescription = "Add to playlist", tint = TextSecondary, modifier = Modifier.size(18.dp))
+        }
+        if (showRemove) {
+            IconButton(onClick = onRemove) {
+                Icon(Icons.Filled.Delete, contentDescription = "Remove from playlist", tint = TextMuted, modifier = Modifier.size(16.dp))
+            }
         }
     }
 }

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="108" height="108" viewBox="0 0 108 108" role="img" aria-label="Wrackline adaptive foreground">
+  <g stroke="#093C39" fill="none" stroke-width="7.6" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M30.00 45.00 L36.86 35.70 L43.71 52.91 L50.57 35.70 L57.43 52.91 L64.29 35.70 L71.14 52.91 L78.00 45.00"/>
+  </g>
+  <g stroke="#093C39" fill="none" stroke-width="3" stroke-linecap="round">
+    <path d="M43.71 52.91 L39.94 76.50 M57.43 52.91 L53.65 76.50 M71.14 52.91 L67.37 76.50"/>
+  </g>
+</svg>
