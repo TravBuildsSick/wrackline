@@ -12,7 +12,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -81,6 +82,7 @@ import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.cos
 import kotlin.math.sin
@@ -211,15 +213,22 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         val found = fromPacks + onDevice
         tracks.clear()
         tracks.addAll(found)
-        val items = found.map { track ->
-            MediaItem.Builder()
-                .setUri(track.uri)
-                .setMediaId(track.id)
-                .setMediaMetadata(MediaMetadata.Builder().setTitle(track.name).setArtist(track.artist).build())
-                .build()
+        // The service can already be mid-playback when this runs — e.g. reconnecting after the
+        // Activity gets recreated on screen lock/unlock. Rebuilding the player's playlist here
+        // unconditionally would reset it back to track 0 every time, killing whatever was
+        // actually playing. Only (re)populate the player's own playlist when it's genuinely
+        // empty; otherwise this call is just refreshing the UI's local track list.
+        if (c.mediaItemCount == 0) {
+            val items = found.map { track ->
+                MediaItem.Builder()
+                    .setUri(track.uri)
+                    .setMediaId(track.id)
+                    .setMediaMetadata(MediaMetadata.Builder().setTitle(track.name).setArtist(track.artist).build())
+                    .build()
+            }
+            c.setMediaItems(items)
+            c.prepare()
         }
-        c.setMediaItems(items)
-        c.prepare()
     }
 
     fun playFrom(list: List<Track>, index: Int) {
@@ -240,8 +249,9 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
     // on-device library permission — they live in app-private storage, no permission needed.
     // Also re-derives each pack's locked playlist on every launch (not just right after a fresh
     // download) so an update from a version that predates playlists still ends up with one.
-    LaunchedEffect(controller) {
-        if (controller == null) return@LaunchedEffect
+    // Callable again from the rescan button, since a failed download previously had no retry
+    // path short of reinstalling the app.
+    suspend fun syncPacks() {
         try {
             val manifest = withContext(Dispatchers.IO) { fetchPackManifest() }
             for (pack in manifest.filter { it.preinstalled }) {
@@ -259,12 +269,22 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                 }
             }
         } catch (e: Exception) {
-            // No network / repo unreachable — fine, just skip preinstall this launch.
+            // Surface this instead of failing silently — a swallowed exception here is exactly
+            // why a broken pack download was invisible to debug previously.
+            android.util.Log.e("WracklinePackSync", "Preinstalled pack sync failed", e)
+            packSyncStatus = "Couldn't download preinstalled music: ${e.message}"
+            delay(3000)
         } finally {
             packSyncStatus = null
             refreshLibrary()
         }
     }
+
+    LaunchedEffect(controller) {
+        if (controller == null) return@LaunchedEffect
+        syncPacks()
+    }
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
 
     // POST_NOTIFICATIONS matters here specifically for lock-screen playback — without it,
     // Media3's foreground-service notification (which carries the lock-screen transport
@@ -290,6 +310,13 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         val listener = Runnable {
             val c = controllerFuture.get()
             controller = c
+            // The service can already be mid-playback when this connects (e.g. reconnecting
+            // after the Activity was recreated on screen lock/unlock) — sync current state
+            // immediately rather than waiting for a change event that may never come, since
+            // nothing is actually changing from the service's point of view.
+            isPlaying = c.isPlaying
+            currentTrackId = c.currentMediaItem?.mediaId
+            durationMs = c.duration.coerceAtLeast(0).toFloat()
             c.addListener(object : Player.Listener {
                 override fun onIsPlayingChanged(playing: Boolean) {
                     isPlaying = playing
@@ -383,24 +410,38 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         }
 
         val tabOrder = listOf("all") + playlists.map { it.id }
-        var tabDragAccum by remember { mutableFloatStateOf(0f) }
 
+        // One unified gesture detector for the whole screen — horizontal swipe cycles playlist
+        // tabs, vertical swipe expands/collapses the visualizer. Two separate orientation-locked
+        // `draggable` modifiers (one on this container, one on the visualizer square) don't
+        // reliably hand off to each other in Compose; a swipe starting on the square was
+        // silently eaten by its own vertical-only detector even when clearly horizontal.
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .draggable(
-                    orientation = androidx.compose.foundation.gestures.Orientation.Horizontal,
-                    state = androidx.compose.foundation.gestures.rememberDraggableState { delta -> tabDragAccum += delta },
-                    onDragStopped = {
-                        val currentIdx = tabOrder.indexOf(selectedTabId).coerceAtLeast(0)
-                        if (tabDragAccum < -80f && currentIdx < tabOrder.lastIndex) {
-                            selectedTabId = tabOrder[currentIdx + 1]
-                        } else if (tabDragAccum > 80f && currentIdx > 0) {
-                            selectedTabId = tabOrder[currentIdx - 1]
-                        }
-                        tabDragAccum = 0f
-                    },
-                ),
+                .pointerInput(tabOrder, selectedTabId) {
+                    var dx = 0f
+                    var dy = 0f
+                    detectDragGestures(
+                        onDragStart = { dx = 0f; dy = 0f },
+                        onDragEnd = {
+                            if (kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
+                                val currentIdx = tabOrder.indexOf(selectedTabId).coerceAtLeast(0)
+                                if (dx < -80f && currentIdx < tabOrder.lastIndex) {
+                                    selectedTabId = tabOrder[currentIdx + 1]
+                                } else if (dx > 80f && currentIdx > 0) {
+                                    selectedTabId = tabOrder[currentIdx - 1]
+                                }
+                            } else {
+                                if (dy > 60f) expanded = true else if (dy < -60f) expanded = false
+                            }
+                        },
+                    ) { change, dragAmount ->
+                        change.consume()
+                        dx += dragAmount.x
+                        dy += dragAmount.y
+                    }
+                },
         ) {
             VisualizerSquare(
                 choice = visualizerChoice,
@@ -415,6 +456,7 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                     } else {
                         permissionLauncher.launch(requestedPermissions)
                     }
+                    scope.launch { syncPacks() }
                 },
                 isPlaying = isPlaying,
                 isShuffleOn = shuffleOn,
@@ -658,7 +700,6 @@ private fun VisualizerSquare(
         targetValue = if (expanded) 0.92f else 0.5f,
         label = "visualizerHeight",
     )
-    var dragAccum by remember { mutableFloatStateOf(0f) }
     // Overlay text/icons sit on top of the visualizer canvas itself, which flips between a
     // near-black and a near-white water in dark/light mode — so these need to track that same
     // switch rather than assuming a dark canvas underneath.
@@ -668,15 +709,7 @@ private fun VisualizerSquare(
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .fillMaxHeight(heightFraction)
-            .draggable(
-                orientation = androidx.compose.foundation.gestures.Orientation.Vertical,
-                state = androidx.compose.foundation.gestures.rememberDraggableState { delta -> dragAccum += delta },
-                onDragStopped = {
-                    if (dragAccum > 60f) onExpandChange(true) else if (dragAccum < -60f) onExpandChange(false)
-                    dragAccum = 0f
-                },
-            ),
+            .fillMaxHeight(heightFraction),
     ) {
         when (choice) {
             VisualizerChoice.RAIN -> RainVisualizer(analyzer = AudioReactive.analyzer, modifier = Modifier.fillMaxSize())
