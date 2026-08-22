@@ -55,12 +55,20 @@ class PlaybackService : MediaSessionService() {
                     object : Visualizer.OnDataCaptureListener {
                         override fun onWaveFormDataCapture(v: Visualizer?, waveform: ByteArray?, samplingRate: Int) {
                             if (waveform == null) return
-                            // Waveform bytes are signed 8-bit PCM centered at 128; average
-                            // absolute deviation from center is a cheap, stable amplitude proxy.
+                            // Visualizer waveform bytes are UNSIGNED 8-bit PCM (0..255, 128 =
+                            // silence) — Kotlin's Byte is signed, so each sample must be masked
+                            // to 0xFF before computing deviation from the 128 midpoint.
                             var sum = 0
-                            for (b in waveform) sum += abs(b.toInt())
+                            for (b in waveform) {
+                                val unsigned = b.toInt() and 0xFF
+                                sum += abs(unsigned - 128)
+                            }
                             val avg = sum.toFloat() / waveform.size
-                            AudioReactive.level.value = (avg / 128f).coerceIn(0f, 1f)
+                            val sample = (avg / 128f).coerceIn(0f, 1f)
+                            // Light exponential smoothing — raw per-frame amplitude is jittery
+                            // enough to read as flicker rather than a pulse.
+                            val prev = AudioReactive.level.value
+                            AudioReactive.level.value = prev * 0.6f + sample * 0.4f
                         }
 
                         override fun onFftDataCapture(v: Visualizer?, fft: ByteArray?, samplingRate: Int) {}

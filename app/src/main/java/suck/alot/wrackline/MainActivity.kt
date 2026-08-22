@@ -2,11 +2,8 @@ package suck.alot.wrackline
 
 import android.Manifest
 import android.content.ComponentName
-import android.content.Intent
-import android.database.Cursor
 import android.net.Uri
 import android.os.Bundle
-import android.provider.OpenableColumns
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -76,7 +73,9 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.ListenableFuture
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -164,10 +163,13 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
     } else {
         Manifest.permission.READ_EXTERNAL_STORAGE
     }
+    var packSyncStatus by remember { mutableStateOf<String?>("Checking for preinstalled music…") }
 
-    fun loadLibrary() {
+    fun refreshLibrary() {
         val c = controller ?: return
-        val found = queryLocalTracks(activity)
+        val onDevice = if (libraryPermissionGranted) queryLocalTracks(activity) else emptyList()
+        val fromPacks = queryPackTracks(activity)
+        val found = fromPacks + onDevice
         tracks.clear()
         tracks.addAll(found)
         val items = found.map { track ->
@@ -179,6 +181,25 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         }
         c.setMediaItems(items)
         c.prepare()
+    }
+
+    // Preinstalled packs (e.g. Shorebreak) download once on first launch, independent of the
+    // on-device library permission — they live in app-private storage, no permission needed.
+    LaunchedEffect(controller) {
+        if (controller == null) return@LaunchedEffect
+        try {
+            val manifest = withContext(Dispatchers.IO) { fetchPackManifest() }
+            for (pack in manifest.filter { it.preinstalled }) {
+                if (isPackInstalled(activity, pack.id)) continue
+                packSyncStatus = "Downloading ${pack.name}…"
+                withContext(Dispatchers.IO) { downloadAndInstallPack(activity, pack) }
+            }
+        } catch (e: Exception) {
+            // No network / repo unreachable — fine, just skip preinstall this launch.
+        } finally {
+            packSyncStatus = null
+            refreshLibrary()
+        }
     }
 
     // POST_NOTIFICATIONS matters here specifically for lock-screen playback — without it,
@@ -193,7 +214,7 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
         libraryPermissionGranted = results[libraryPermission] == true
-        if (libraryPermissionGranted) loadLibrary()
+        if (libraryPermissionGranted) refreshLibrary()
         // RECORD_AUDIO/POST_NOTIFICATIONS being denied doesn't block this — playback still works,
         // just without the reactive ring and/or the lock-screen notification respectively.
     }
@@ -238,7 +259,7 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
     // Covers the case where permission was granted before the MediaController finished
     // connecting (or vice versa) — whichever resolves second triggers the load.
     LaunchedEffect(controller, libraryPermissionGranted) {
-        if (controller != null && libraryPermissionGranted && tracks.isEmpty()) loadLibrary()
+        if (controller != null && libraryPermissionGranted && tracks.isEmpty()) refreshLibrary()
     }
 
     val currentTrack = tracks.getOrNull(currentIndex)
@@ -274,7 +295,7 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                 )
                 IconButton(onClick = {
                     if (libraryPermissionGranted) {
-                        loadLibrary()
+                        refreshLibrary()
                     } else {
                         permissionLauncher.launch(requestedPermissions)
                     }
@@ -424,6 +445,10 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
             )
             Spacer(Modifier.height(8.dp))
 
+            packSyncStatus?.let {
+                Text(it, color = TextSecondary, fontSize = 13.sp, modifier = Modifier.padding(bottom = 8.dp))
+            }
+
             if (tracks.isEmpty()) {
                 Box(
                     modifier = Modifier
@@ -432,8 +457,11 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
-                        if (!libraryPermissionGranted) "Grant music library access to see your songs"
-                        else "No music found on this device",
+                        when {
+                            packSyncStatus != null -> ""
+                            !libraryPermissionGranted -> "Grant music library access to see your songs"
+                            else -> "No music found on this device"
+                        },
                         color = TextMuted,
                         fontSize = 13.sp,
                     )
