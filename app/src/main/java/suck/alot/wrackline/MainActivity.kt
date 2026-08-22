@@ -181,15 +181,24 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
         c.prepare()
     }
 
+    // POST_NOTIFICATIONS matters here specifically for lock-screen playback — without it,
+    // Media3's foreground-service notification (which carries the lock-screen transport
+    // controls) can't post on API 33+, even though the service itself still runs.
+    val requestedPermissions = if (android.os.Build.VERSION.SDK_INT >= 33) {
+        arrayOf(libraryPermission, Manifest.permission.RECORD_AUDIO, Manifest.permission.POST_NOTIFICATIONS)
+    } else {
+        arrayOf(libraryPermission, Manifest.permission.RECORD_AUDIO)
+    }
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) { results ->
         libraryPermissionGranted = results[libraryPermission] == true
         if (libraryPermissionGranted) loadLibrary()
-        // RECORD_AUDIO just disables the reactive ring if denied — playback still works.
+        // RECORD_AUDIO/POST_NOTIFICATIONS being denied doesn't block this — playback still works,
+        // just without the reactive ring and/or the lock-screen notification respectively.
     }
     LaunchedEffect(Unit) {
-        permissionLauncher.launch(arrayOf(libraryPermission, Manifest.permission.RECORD_AUDIO))
+        permissionLauncher.launch(requestedPermissions)
     }
 
     DisposableEffect(controllerFuture) {
@@ -267,7 +276,7 @@ private fun PlayerScreen(controllerFuture: ListenableFuture<MediaController>) {
                     if (libraryPermissionGranted) {
                         loadLibrary()
                     } else {
-                        permissionLauncher.launch(arrayOf(libraryPermission, Manifest.permission.RECORD_AUDIO))
+                        permissionLauncher.launch(requestedPermissions)
                     }
                 }) {
                     Icon(Icons.Filled.Refresh, contentDescription = "Rescan library", tint = TextPrimary)
